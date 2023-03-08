@@ -1,6 +1,6 @@
 {
     "name": "htcw_ft6236",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Provides support for the FT6236 capacitive touch panel",
     "keywords": ["touch", "capacitive", "touch-panel", "lcd"],
     "authors": {
@@ -10,6 +10,9 @@
     "license": "MIT",
     "frameworks": ["arduino"],
     "platforms": "*",
+    "dependencies": {
+        "Wire": "*"
+    },
     "repository":
     {
         "type": "git",
