@@ -13,10 +13,51 @@ Written by Limor Fried/Ladyada for Adafruit Industries.
 @section license License
 MIT license, all text above must be included in any redistribution
 */
+// Portions derived from FT6X36-IDF https://github.com/martinberlin/FT6X36-IDF
+// Original license below:
+/*
+MIT License
+
+Copyright (c) 2019 strange_v
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
 #pragma once
+#if __has_include(<Arduino.h>)
 #include <Arduino.h>
 #include <Wire.h>
 namespace arduino {
+#else
+#include <esp_timer.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "driver/gpio.h"
+#include "driver/i2c.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+namespace esp_idf {
+#endif
+
 template <uint16_t Width, uint16_t Height, uint8_t Threshhold = 128, uint8_t Address = 0x38>
 class ft6236 final {
     constexpr static const uint8_t TOUCH_REG_XL = 0x04;
@@ -31,8 +72,15 @@ class ft6236 final {
     constexpr static const uint8_t FT6206_CHIPID = 0x6;
     constexpr static const uint8_t FT6236_CHIPID = 0x36;
     constexpr static const uint8_t FT6236U_CHIPID = 0x64;
-
+#ifdef ARDUINO
     TwoWire& m_i2c;
+#else
+    constexpr static const uint8_t ACK_CHECK_EN = 0x1;
+    constexpr static const uint8_t ACK_CHECK_DIS = 0x0;
+    constexpr static const uint8_t ACK_VAL = 0x0;
+    constexpr static const uint8_t NACK_VAL = 0x1;
+    i2c_port_t m_i2c;
+#endif
     uint8_t m_rotation;
     bool m_initialized;
     size_t m_touches;
@@ -45,11 +93,12 @@ class ft6236 final {
         m_rotation = rhs.m_rotation;
         m_initialized = rhs.m_initialized;
         m_touches = rhs.m_touches;
-        memcpy(m_touches_x,rhs.m_touches_x,sizeof(m_touches_x));
-        memcpy(m_touches_y,rhs.m_touches_y,sizeof(m_touches_y));
-        memcpy(m_touches_id,rhs.m_touches_id,sizeof(m_touches_id));
+        memcpy(m_touches_x, rhs.m_touches_x, sizeof(m_touches_x));
+        memcpy(m_touches_y, rhs.m_touches_y, sizeof(m_touches_y));
+        memcpy(m_touches_id, rhs.m_touches_id, sizeof(m_touches_id));
     }
     int reg(int r) const {
+#ifdef ARDUINO
         int result = 0;
         m_i2c.beginTransmission(address);
         m_i2c.write(r);
@@ -59,15 +108,41 @@ class ft6236 final {
             result = m_i2c.read();
         }
         return result;
+#else
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, address << 1 | I2C_MASTER_WRITE, ACK_CHECK_EN);
+        i2c_master_write_byte(cmd, r, I2C_MASTER_ACK);
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (address << 1) | I2C_MASTER_READ, true);
+        uint8_t result;
+        i2c_master_read_byte(cmd, &result, I2C_MASTER_NACK);
+        i2c_master_stop(cmd);
+        i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS(1000));
+        i2c_cmd_link_delete(cmd);
+        return result;
+#endif
     }
     void reg(int r, int value) {
+#ifdef ARDUINO
         m_i2c.beginTransmission(address);
         m_i2c.write((uint8_t)r);
         m_i2c.write((uint8_t)value);
         m_i2c.endTransmission();
+#else
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, address << 1 | I2C_MASTER_WRITE, ACK_CHECK_EN);
+        i2c_master_write_byte(cmd, r, ACK_CHECK_EN);
+        i2c_master_write_byte(cmd, value, ACK_CHECK_EN);
+        i2c_master_stop(cmd);
+        i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS(1000));
+        i2c_cmd_link_delete(cmd);
+#endif
     }
     void read_all() {
         uint8_t i2cdat[16];
+#ifdef ARDUINO
         m_i2c.beginTransmission(address);
         m_i2c.write((uint8_t)0);
         m_i2c.endTransmission();
@@ -75,7 +150,23 @@ class ft6236 final {
         m_i2c.requestFrom((uint8_t)address, (uint8_t)16);
         for (uint8_t i = 0; i < 16; i++)
             i2cdat[i] = m_i2c.read();
-
+#else
+    // Read data
+	i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (address<<1), ACK_CHECK_EN);
+    i2c_master_write_byte(cmd, 0, ACK_CHECK_EN);
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS( 1000));
+    i2c_cmd_link_delete(cmd);
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (address<<1)|1, ACK_CHECK_EN);
+    i2c_master_read(cmd, i2cdat, sizeof(i2cdat),  I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+#endif
         m_touches = i2cdat[0x02];
         if (m_touches > 2) {
             m_touches = 0;
@@ -91,8 +182,8 @@ class ft6236 final {
             m_touches_id[i] = i2cdat[0x05 + i * 6] >> 4;
         }
     }
-    bool read_point(size_t n,uint16_t* out_x, uint16_t* out_y) const {
-        if(m_touches==0 || n<0 || n>=m_touches) {
+    bool read_point(size_t n, uint16_t* out_x, uint16_t* out_y) const {
+        if (m_touches == 0 || n >= m_touches) {
             if (out_x != nullptr) {
                 *out_x = 0;
             }
@@ -151,7 +242,13 @@ class ft6236 final {
         do_move(rhs);
         return *this;
     }
-    ft6236(TwoWire& i2c = Wire) : m_i2c(i2c), m_rotation(0), m_touches(0) {
+    ft6236(
+#ifdef ARDUINO
+        TwoWire& i2c = Wire
+#else
+        i2c_port_t i2c = I2C_NUM_0
+#endif
+        ) : m_i2c(i2c), m_rotation(0), m_touches(0) {
     }
 
     bool initialized() const {
@@ -159,7 +256,9 @@ class ft6236 final {
     }
     bool initialize() {
         if (!m_initialized) {
+#ifdef ARDUINO
             m_i2c.begin();
+#endif
             reg(TOUCH_REG_THRESHHOLD, threshhold);
 
             // Check if our chip has the correct Vendor ID
@@ -197,13 +296,13 @@ class ft6236 final {
         return result;
     }
     bool xy(uint16_t* out_x, uint16_t* out_y) const {
-        return read_point(0,out_x,out_y);
+        return read_point(0, out_x, out_y);
     }
     bool xy2(uint16_t* out_x, uint16_t* out_y) const {
-        return read_point(1,out_x,out_y);
+        return read_point(1, out_x, out_y);
     }
     bool update() {
-        if(!initialize()) {
+        if (!initialize()) {
             return false;
         }
         read_all();
